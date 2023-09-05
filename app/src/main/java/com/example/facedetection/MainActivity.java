@@ -2,9 +2,16 @@ package com.example.facedetection;
 
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.camera.core.CameraSelector;
+import androidx.camera.core.ImageCapture;
+import androidx.camera.core.Preview;
+import androidx.camera.lifecycle.ProcessCameraProvider;
+import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
@@ -12,8 +19,13 @@ import android.app.Dialog;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.os.Bundle;
+import android.os.Handler;
+import android.util.Size;
+import android.util.SparseArray;
 import android.view.View;
+import android.widget.ImageView;
 
 import com.example.facedetection.camera.CameraSourcePreview;
 import com.example.facedetection.camera.GraphicFaceTrackerFactory;
@@ -22,12 +34,19 @@ import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.GoogleApiAvailability;
 import com.google.android.gms.vision.CameraSource;
 
+import com.google.android.gms.vision.Frame;
 import com.google.android.gms.vision.MultiProcessor;
 
+import com.google.android.gms.vision.face.Face;
 import com.google.android.gms.vision.face.FaceDetector;
+import com.google.common.util.concurrent.ListenableFuture;
 
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 
 public class MainActivity extends AppCompatActivity {
     private CameraSource mCameraSource = null;
@@ -35,19 +54,21 @@ public class MainActivity extends AppCompatActivity {
     private GraphicOverlay mGraphicOverlay;
     private static final int RC_HANDLE_GMS = 9001;
     private static final int RC_HANDLE_CAMERA_PERM = 2;
-
+    FaceDetector faceDetector;
+    private ListenableFuture<ProcessCameraProvider> cameraProviderFuture;
+    PreviewView previewView;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        initView();
         int rc = ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA);
         if (rc == PackageManager.PERMISSION_GRANTED) {
-            createCameraSource();
+
         } else {
             requestCameraPermission();
         }
+        initView();
 
         faceDetector = new FaceDetector.Builder(this)
                 .setTrackingEnabled(false)
@@ -58,16 +79,108 @@ public class MainActivity extends AppCompatActivity {
                     .setMessage("Face Detector could not be set up on your device :(")
                     .show();
         }
+        cameraShow();
     }
 
 
-    FaceDetector faceDetector;
+    ImageView img;
+    float WIDTH;
+    float HEIGHT;
 
+    int top = 0;
+    int left = 0;
+    int right = 0;
+    int bottom = 0;
+
+    private void cameraShow() {
+        Handler handler = new Handler();
+        Runnable runnable = new Runnable() {
+            @Override
+            public void run() {
+                Bitmap bitmap = previewView.getBitmap();
+                if (bitmap != null) {
+//                    WIDTH = bitmap.getWidth();
+//                    HEIGHT = bitmap.getHeight();
+                    Frame frame = new Frame.Builder().setBitmap(bitmap).build();
+                    SparseArray<Face> sparseArray = faceDetector.detect(frame);
+                    if (sparseArray.size() > 0) {
+                        for (int i = 0; i < sparseArray.size(); i++) {
+                            Face face = sparseArray.valueAt(i);
+                            int left = (int) face.getPosition().x;
+                            int top = (int) face.getPosition().y;
+                            if (left < 0) {
+                                left = 0;
+                            }
+                            if (top < 0) {
+                                top = 0;
+                            }
+                            int right = left + (int) face.getWidth();
+                            int bottom = top + (int) face.getHeight();
+
+
+                            //draw boudding box
+                            drawBoundingBox.updateRectangle(left, top, right, bottom);
+
+                        }
+                    } else {
+                        top = 0;
+                        left = 0;
+                        right = 0;
+                        bottom = 0;
+                        drawBoundingBox.updateRectangle(0, 0, 0, 0);
+                    }
+                }
+                handler.postDelayed(this, 1);
+            }
+        };
+        handler.post(runnable);
+    }
+
+    DrawBoundingBox drawBoundingBox;
 
     private void initView() {
-        mPreview = findViewById(R.id.preview);
-        mGraphicOverlay = findViewById(R.id.faceOverlay);
+        previewView = findViewById(R.id.preview);
+        drawBoundingBox = findViewById(R.id.drawbox);
+        cameraProviderFuture = ProcessCameraProvider.getInstance(this);
+        cameraProviderFuture.addListener(() -> {
+            try {
+                ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
+                startCameraX(cameraProvider);
+            } catch (ExecutionException e) {
+                e.printStackTrace();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
 
+        }, getExecutor());
+    }
+
+
+    private Executor getExecutor() {
+        return ContextCompat.getMainExecutor(this);
+    }
+
+    private ImageCapture imageCapture;
+
+    @SuppressLint("RestrictedApi")
+    private void startCameraX(ProcessCameraProvider cameraProvider) {
+
+        cameraProvider.unbindAll();
+
+        CameraSelector cameraSelector = new CameraSelector.Builder()
+                .requireLensFacing(CameraSelector.LENS_FACING_BACK)
+                .build();
+
+        Preview preview = new Preview.Builder().build();
+
+        preview.setSurfaceProvider(previewView.getSurfaceProvider());
+
+        imageCapture = new ImageCapture.Builder().setMaxResolution(new Size(640, 640))
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .build();
+
+
+        cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageCapture);
     }
 
 
@@ -90,42 +203,6 @@ public class MainActivity extends AppCompatActivity {
 
     }
 
-    private void createCameraSource() {
-        Context context = getApplicationContext();
-        FaceDetector detector = new FaceDetector.Builder(context)
-                .setClassificationType(FaceDetector.ALL_LANDMARKS)
-                .setMode(FaceDetector.ACCURATE_MODE)
-                .build();
-        detector.setProcessor(
-                new MultiProcessor.Builder<>(new GraphicFaceTrackerFactory(mGraphicOverlay, MainActivity.this))
-                        .build());
-        mCameraSource = new CameraSource.Builder(context, detector)
-                .setAutoFocusEnabled(true)
-                .setFacing(CameraSource.CAMERA_FACING_BACK)
-                .setRequestedPreviewSize(1280, 720)
-                .setRequestedFps(30.0f)
-                .build();
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        startCameraSource();
-    }
-
-    @Override
-    protected void onPause() {
-        super.onPause();
-        mPreview.stop();
-    }
-
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        if (mCameraSource != null) {
-            mCameraSource.release();
-        }
-    }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions,
@@ -136,8 +213,6 @@ public class MainActivity extends AppCompatActivity {
         }
 
         if (grantResults.length != 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-
-            createCameraSource();
             return;
         }
 
@@ -154,24 +229,5 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
-
-    private void startCameraSource() {
-        int code = GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(
-                getApplicationContext());
-        if (code != ConnectionResult.SUCCESS) {
-            Dialog dlg =
-                    GoogleApiAvailability.getInstance().getErrorDialog(this, code, RC_HANDLE_GMS);
-            dlg.show();
-        }
-
-        if (mCameraSource != null) {
-            try {
-                mPreview.start(mCameraSource, mGraphicOverlay);
-            } catch (IOException e) {
-                mCameraSource.release();
-                mCameraSource = null;
-            }
-        }
-    }
 
 }
